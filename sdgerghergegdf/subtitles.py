@@ -26,6 +26,7 @@ class SubtitlesEngine:
             self.recognizer.SetWords(True)
             return True
         except Exception as e:
+            print(f"[Subtitles] Ошибка загрузки модели Vosk: {e}")
             return False
 
     def set_device(self, device_index):
@@ -39,7 +40,7 @@ class SubtitlesEngine:
                                        dev['maxInputChannels'],
                                        sample_rate)
         except Exception as e:
-            pass
+            print(f"[Subtitles] Ошибка установки устройства: {e}")
         finally:
             p.terminate()
         return self.current_device is not None
@@ -69,10 +70,15 @@ class SubtitlesEngine:
         history = []
         max_history_lines = 3
         
+        # ТОЧНОЕ ВОССТАНОВЛЕНИЕ ТВОИХ ОРИГИНАЛЬНЫХ ИНДЕКСОВ
         channels, rate = self.current_device[1], self.current_device[2]
         
         # Переменная для очистки экрана после долгого молчания
         last_speech_time = time.time()
+        
+        # Переменные для фиксации прошлых состояний (Фикс KAN-14 от наложений текста)
+        last_sent_display = ""
+        part_text = ""
         
         while self.is_running:
             try:
@@ -91,8 +97,12 @@ class SubtitlesEngine:
                             history.pop(0)
                         
                         full_display = "\n".join(history)
-                        if self.callback:
+                        
+                        # Фикс KAN-14: Передаем в callback только если текст РЕАЛЬНО изменился
+                        if full_display != last_sent_display and self.callback:
                             self.callback(full_display, False)
+                            last_sent_display = full_display
+                            
                         last_speech_time = time.time()
                 else:
                     # ПРОМЕЖУТОЧНЫЙ РЕЗУЛЬТАТ (черновик фразы)
@@ -102,14 +112,19 @@ class SubtitlesEngine:
                     if part_text:
                         # Показываем историю + текущий "черновик" внизу
                         current_display = "\n".join(history + [part_text])
-                        if self.callback:
+                        
+                        # Фикс KAN-14: Защита от лишнего флуда перерисовки UI
+                        if current_display != last_sent_display and self.callback:
                             self.callback(current_display, True)
+                            last_sent_display = current_display
+                            
                         last_speech_time = time.time()
                 
                 # АВТО-ОЧИСТКА: если молчим больше 5 секунд, очищаем экран
                 if time.time() - last_speech_time > 5.0 and (history or part_text):
                     history = []
                     part_text = ""
+                    last_sent_display = ""
                     if self.callback:
                         self.callback("", False)
 
@@ -117,21 +132,26 @@ class SubtitlesEngine:
                 # Даже если данных нет, проверяем таймер очистки
                 if time.time() - last_speech_time > 5.0 and history:
                     history = []
-                    if self.callback: self.callback("", False)
+                    last_sent_display = ""
+                    if self.callback: 
+                        self.callback("", False)
                 continue
             except Exception as e:
                 print(f"Subtitles error: {e}")
 
-
     def start(self):
+        if self.is_running or self.audio_stream:
+            return True
+            
         if not self.recognizer and not self.load_model():
             return False
         if not self.current_device:
             return False
+            
         self.is_running = True
         self.p = pyaudio.PyAudio()
         try:
-            dev_idx, channels, rate = self.current_device
+            dev_idx, channels, rate = self.current_device[0], self.current_device[1], self.current_device[2]
             self.audio_stream = self.p.open(
                 format=pyaudio.paInt16,
                 channels=channels,
@@ -142,6 +162,11 @@ class SubtitlesEngine:
                 stream_callback=self.audio_callback
             )
             self.audio_stream.start_stream()
+            
+            # Перед стартом полностью очищаем очередь от старого мусора в памяти
+            with self.audio_queue.mutex:
+                self.audio_queue.queue.clear()
+                
             self.thread = threading.Thread(target=self.process_loop, daemon=True)
             self.thread.start()
             return True
@@ -151,19 +176,32 @@ class SubtitlesEngine:
 
     def stop(self):
         self.is_running = False
+        
         if self.audio_stream:
             try:
                 self.audio_stream.stop_stream()
                 self.audio_stream.close()
             except:
                 pass
+            self.audio_stream = None
+            
         if self.p:
             try:
                 self.p.terminate()
             except:
                 pass
+            self.p = None
+            
+        # Защита KAN-3: Ожидаем физического закрытия потока, чтобы не ловить Race Condition
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=0.2)
+            
         self.thread = None
         self.last_text = ""
+        
+        # Полностью очищаем буфер аудио-очереди
+        with self.audio_queue.mutex:
+            self.audio_queue.queue.clear()
 
     def get_loopback_devices(self):
         p = pyaudio.PyAudio()

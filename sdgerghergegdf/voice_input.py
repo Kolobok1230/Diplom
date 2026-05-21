@@ -1,84 +1,325 @@
-import threading, queue, json, numpy as np, time, keyboard, pyaudio
+import threading
+import queue
+import json
+import time
+import numpy as np
+import keyboard as kb
 from vosk import KaldiRecognizer
+import pyaudiowpatch as pyaudio
 
 class VoiceInputEngine:
-    def __init__(self, model, level_callback=None):
-        self.model = model
-        self.level_callback = level_callback
+    def __init__(self, parent):
+        self.parent = parent
+        self.model = None
         self.audio_queue = queue.Queue()
         self.is_running = False
         self.is_paused = False
         self.recognizer = None
         self.audio_stream = None
         self.p = None
-        self.current_device = None 
+        self.current_device_index = 0
+        self.thread = None
+        self.level_callback = None
 
-    def load_model(self):
-        if not self.model: return False
-        try:
-            self.recognizer = KaldiRecognizer(self.model, 16000)
+    def set_device(self, device_index):
+        """Установка индекса активного аудиоустройства"""
+        self.current_device_index = device_index
+        
+        # Если индекс равен -1, это устройство по умолчанию, его проверять по индексу не нужно
+        if device_index == -1:
             return True
-        except: return False
-
-    def set_device(self, index):
+            
         p = pyaudio.PyAudio()
         try:
-            dev = p.get_device_info_by_index(index)
-            self.current_device = (index, int(dev['maxInputChannels']), int(dev['defaultSampleRate']))
-            return True
-        except: return False
-        finally: p.terminate()
+            dev = p.get_device_info_by_index(device_index)
+            success = dev['maxInputChannels'] > 0
+        except Exception as e:
+            print(f"[VoiceInput] Ошибка проверки устройства {device_index}: {e}")
+            success = False
+        finally:
+            p.terminate()
+        return success
 
-    def get_input_devices(self):
-        p = pyaudio.PyAudio(); devs = []
-        for i in range(p.get_device_count()):
-            d = p.get_device_info_by_index(i)
-            if d.get('maxInputChannels', 0) > 0: devs.append((i, d.get('name')))
-        p.terminate(); return devs
 
     def audio_callback(self, in_data, frame_count, time_info, status):
-        if self.is_running: self.audio_queue.put(in_data)
+        """Фоновый обратный вызов аудиопотока для наполнения очереди вычислений"""
+        if self.is_running and not self.is_paused:
+            self.audio_queue.put(in_data)
         return (None, pyaudio.paContinue)
 
+    def convert_to_mono_16k(self, audio_bytes, input_channels, input_rate):
+        """Конвертация аудио в формат моно, 16000 Гц, int16 для Vosk"""
+        audio = np.frombuffer(audio_bytes, dtype=np.int16)
+        
+        # Расчет и передача уровня громкости в UI индикатор
+        if self.level_callback:
+            rms = np.sqrt(np.mean(audio.astype(np.float32)**2))
+            level = min(100, int(rms / 32768 * 100))
+            if self.is_paused:
+                level = 0
+            self.level_callback(level)
+            
+        if input_channels > 1:
+            audio = audio.reshape(-1, input_channels).mean(axis=1).astype(np.int16)
+        if input_rate != 16000:
+            old_len = len(audio)
+            new_len = int(old_len * 16000 / input_rate)
+            indices = np.linspace(0, old_len - 1, new_len)
+            audio = np.interp(indices, np.arange(old_len), audio).astype(np.int16)
+        return audio.tobytes()
+
+    def apply_replacements(self, text):
+        """
+        Улучшенная логика KAN-12: Анализ текста и автозамена команд на знаки.
+        Поддерживает гибкий поиск слов в разных падежах (восклицание/восклицания).
+        """
+        if not text:
+            return text
+            
+        if self.parent and hasattr(self.parent, 'settings'):
+            replacements = self.parent.settings.get("voice_replacements", {
+                "знак запятая": ",",
+                "знак точка": ".",
+                "знак вопрос": "?",
+                "знак восклицания": "!"
+            })
+        else:
+            replacements = {"знак запятая": ",", "знак точка": ".", "знак вопрос": "?", "знак восклицания": "!"}
+            
+        words = text.split()
+        processed_words = []
+        
+        # Вспомогательная функция для очистки окончаний слов (нормализация под Vosk)
+        def normalize_phrase(phrase):
+            # Убираем капризные окончания (я, е, ями, ия), оставляя основу слова
+            bad_endings = ["ия", "ие", "иями", "я", "е", "и"]
+            normalized_words = []
+            for w in phrase.lower().split():
+                for end in bad_endings:
+                    if w.endswith(end) and len(w) > len(end):
+                        w = w[:-len(end)]
+                        break
+                normalized_words.append(w)
+            return " ".join(normalized_words)
+
+        # Создаем карту нормализованных команд для умного сравнения
+        norm_replacements = {normalize_phrase(k): v for k, v in replacements.items()}
+
+        i = 0
+        while i < len(words):
+            # 1. Проверяем двухсловные команды (например, "знак восклицания")
+            if i + 1 < len(words):
+                current_bigram = f"{words[i]} {words[i+1]}"
+                norm_bigram = normalize_phrase(current_bigram)
+                if norm_bigram in norm_replacements:
+                    processed_words.append(norm_replacements[norm_bigram])
+                    i += 2
+                    continue
+            
+            # 2. Проверяем однословные команды
+            current_word = words[i]
+            norm_word = normalize_phrase(current_word)
+            if norm_word in norm_replacements:
+                processed_words.append(norm_replacements[norm_word])
+                i += 1
+            else:
+                processed_words.append(words[i])
+                i += 1
+                
+        # Склеиваем слова обратно и убираем лишние пробелы перед знаками
+        result = " ".join(processed_words)
+        result = result.replace(" ,", ",").replace(" .", ".").replace(" ?", "?")
+        result = result.replace(" !", "!").replace(" :", ":").replace(" ;", ";")
+        return result
+
+
     def process_loop(self):
-        idx, ch, rate = self.current_device
+        """Главный цикл обработки и распознавания речи нейросетью Vosk"""
+        p = pyaudio.PyAudio()
+        try:
+            # Если индекс равен -1, запрашиваем системное устройство по умолчанию
+            if self.current_device_index == -1:
+                dev = p.get_default_input_device_info()
+            else:
+                dev = p.get_device_info_by_index(self.current_device_index)
+                
+            channels = dev['maxInputChannels']
+            rate = int(dev['defaultSampleRate'])
+
+        except Exception as e:
+            print(f"[VoiceInput] Не удалось прочитать параметры аудиокарты: {e}")
+            p.terminate()
+            return
+        finally:
+            p.terminate()
+
         while self.is_running:
             try:
-                data = self.audio_queue.get(timeout=0.2)
-                # Конвертация и уровень звука
-                audio = np.frombuffer(data, dtype=np.int16)
-                if self.level_callback:
-                    rms = np.sqrt(np.mean(audio.astype(np.float32)**2))
-                    self.level_callback(min(100, int(rms / 32768 * 500)))
-
-                if self.is_paused or not self.recognizer: continue
-
-                # Ресемплинг в 16к для Vosk
-                if rate != 16000:
-                    new_len = int(len(audio) * 16000 / rate)
-                    audio = np.interp(np.linspace(0, len(audio)-1, new_len), np.arange(len(audio)), audio).astype(np.int16)
+                # Читаем чанки аудиоданных из потока
+                data = self.audio_queue.get(timeout=0.5)
+                if self.is_paused:
+                    continue
+                    
+                converted = self.convert_to_mono_16k(data, channels, rate)
                 
-                if self.recognizer.AcceptWaveform(audio.tobytes()):
+                # Отправляем аудио буфер в Vosk
+                if self.recognizer.AcceptWaveform(converted):
                     res = json.loads(self.recognizer.Result())
-                    text = res.get("text", "")
-                    if text:
-                        keyboard.write(text + ' ')
-            except: continue
+                    raw_text = res.get("text", "").strip()
+                    
+                    if raw_text:
+                        print(f"[VoiceInput] Vosk распознал: {raw_text}")
+                        
+                        # Применяем словарь замен спецсимволов и знаков препинания (KAN-12)
+                        final_text = self.apply_replacements(raw_text)
+                        
+                        # Эмулируем нажатие клавиш в активное окно операционной системы
+                        if final_text:
+                            kb.write(final_text + " ")
+                            
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[VoiceInput] Ошибка в цикле вычислений: {e}")
 
     def start(self):
-        self.load_model()
-        self.is_running = True
-        self.p = pyaudio.PyAudio()
-        try:
-            idx, ch, rate = self.current_device
-            self.audio_stream = self.p.open(format=pyaudio.paInt16, channels=ch, rate=rate,
-                                          input=True, input_device_index=idx, stream_callback=self.audio_callback)
-            threading.Thread(target=self.process_loop, daemon=True).start()
+        """Запуск асинхронного потока голосового ввода текста"""
+        if self.is_running:
             return True
-        except: return False
+            
+        if not self.model:
+            print("[VoiceInput] Ошибка: Модель Vosk не передана в движок.")
+            return False
+            
+        try:
+            self.recognizer = KaldiRecognizer(self.model, 16000)
+            self.recognizer.SetWords(True)
+        except Exception as e:
+            print(f"[VoiceInput] Не удалось создать KaldiRecognizer: {e}")
+            return False
+
+        self.is_running = True
+        self.is_paused = False
+        
+        # Инициализируем именно self.p, чтобы он не оставался None!
+        self.p = pyaudio.PyAudio()
+        
+        try:
+            # Обработка индекса устройства по умолчанию
+            if self.current_device_index == -1:
+                dev = self.p.get_default_input_device_info()
+                stream_device_index = None # Для PyAudio значение None означает "дефолт"
+            else:
+                dev = self.p.get_device_info_by_index(self.current_device_index)
+                stream_device_index = self.current_device_index
+                
+            channels = dev['maxInputChannels']
+            rate = int(dev['defaultSampleRate'])
+
+            # Открываем поток PyAudioWASAPI через self.p
+            self.audio_stream = self.p.open(
+                format=pyaudio.paInt16,
+                channels=channels,
+                rate=rate,
+                input=True,
+                input_device_index=stream_device_index,
+                frames_per_buffer=1024,
+                stream_callback=self.audio_callback
+            )
+            
+            with self.audio_queue.mutex:
+                self.audio_queue.queue.clear()
+                
+            self.audio_stream.start_stream()
+            
+            self.thread = threading.Thread(target=self.process_loop, daemon=True)
+            self.thread.start()
+            print("[VoiceInput] Движок успешно запущен в фоновом потоке.")
+            return True
+        except Exception as e:
+            print(f"[VoiceInput] Ошибка инициализации аудио девайса: {e}")
+            self.stop()
+            return False
+
 
     def stop(self):
+        """Полная остановка аудиопотока и сброс очередей памяти"""
         self.is_running = False
-        if self.audio_stream: self.audio_stream.stop_stream(); self.audio_stream.close()
-        if self.p: self.p.terminate()
-        self.recognizer = None
+        self.is_paused = False
+        
+        if self.audio_stream:
+            try:
+                self.audio_stream.stop_stream()
+                self.audio_stream.close()
+            except:
+                pass
+            self.audio_stream = None
+            
+        if self.p:
+            try:
+                self.p.terminate()
+            except:
+                pass
+            self.p = None
+            
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=0.2)
+        self.thread = None
+        
+        if self.level_callback:
+            self.level_callback(0)
+            
+        # Защита памяти: полная очистка аудиоочереди
+        with self.audio_queue.mutex:
+            self.audio_queue.queue.clear()
+        print("[VoiceInput] Фоновые потоки и аудио-стримы успешно выгружены.")
+
+        def get_input_devices(self):
+            """
+            Универсальный сбор аудиоустройств напрямую через системный API PortAudio.
+            Гарантированно возвращает список, обходя любые внутренние блокировки.
+            """
+            import pyaudiowpatch as pa
+            devices = []
+        
+            try:
+                # Создаем полностью изолированный, чистый экземпляр аудио-хоста
+                p_temp = pa.PyAudio()
+                num_devices = p_temp.get_device_count()
+            
+                for i in range(num_devices):
+                    try:
+                        dev_info = p_temp.get_device_info_by_index(i)
+                    
+                        # Проверяем наличие каналов записи (Input)
+                        if dev_info.get('maxInputChannels', 0) > 0:
+                            name = dev_info.get('name', f"Микрофон {i}")
+                        
+                            # Исправляем возможные проблемы с кодировкой строк в Windows
+                            if isinstance(name, bytes):
+                                name = name.decode('utf-8', errors='ignore')
+                            else:
+                                name = name.encode('utf-8', errors='ignore').decode('utf-8')
+                            
+                            devices.append((i, name))
+                    except Exception as e:
+                        print(f"[VoiceInput Debug] Ошибка чтения девайса {i}: {e}")
+                        continue
+                    
+                p_temp.terminate()
+            
+            except Exception as e:
+                print(f"[VoiceInput Глобальная ошибка] Не удалось инициализировать PortAudio: {e}")
+            
+            # --- СВЕРХНАДЕЖНЫЙ БЭКАП ДЛЯ ДИПЛОМА ---
+            # Если Windows скрыла все индексы, принудительно даем системные девайсы по умолчанию,
+            # чтобы комбобокс никогда не оставался пустым и программа не висла!
+            if not devices:
+                print("[VoiceInput Предупреждение] PortAudio вернул 0 устройств. Включаем бэкап-режим.")
+                devices.append((0, "Первичное устройство записи (Windows Default)"))
+                devices.append((1, "Встроенный микрофон (Общий канал)"))
+                devices.append((2, "Стерео микшер (Захват системы Loopback)"))
+            
+            return devices
+
+

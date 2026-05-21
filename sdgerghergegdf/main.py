@@ -11,6 +11,7 @@ import zipfile
 import shutil
 import tempfile
 import random
+import time
 import string
 import webbrowser
 import subprocess
@@ -72,7 +73,10 @@ class AssistiveSuite(tb.Window):
         self.voice_engine = None
         self.voice_active = False
         self.voice_paused = False
-        self.selected_voice_device = 0
+        self.selected_voice_device = self.settings.get("voice_input", {}).get("device_index", -1)
+        if hasattr(self, 'voice_input') and self.voice_input:
+            self.voice_input.set_device(self.selected_voice_device)
+
         self.voice_level = 0
         self.shared_model = None
         self.voice_engine = VoiceInputEngine(None)
@@ -109,6 +113,7 @@ class AssistiveSuite(tb.Window):
         self.hotkey_cmd = HotkeyCommandsManager(self)
         self.script_launcher = ScriptLauncherManager(self)
 
+        self.last_subtitle_toggle_time = 0
         self.status_frame = tb.Frame(self, height=30)
         self.status_frame.pack(side=tk.BOTTOM, fill=tk.X)
         self.status_label_main = tb.Label(self.status_frame, text="Загрузка модели...", font=("Segoe UI", 9))
@@ -707,20 +712,28 @@ class AssistiveSuite(tb.Window):
             lbl_desc = tb.Label(card, text=desc, font=("Segoe UI", 10), foreground="gray")
             lbl_desc.pack(anchor=tk.W, pady=(2, 0))
 
-    def on_switch_toggle(self, func_name):
+    def on_switch_toggle( self, func_name):
         if func_name == "Субтитры из звука":
             if self.model_loading:
-                messagebox.showwarning("Загрузка модели", "Модель ещё загружается.")
-                self.subtitles_var.set(False)
+                messagebox. showwarning("Загрузка модели", "Модель ещё загружается.")
+                self. subtitles_var. set( False)
                 return
             if not self.model_loaded:
-                messagebox.showerror("Ошибка", "Модель не загружена.")
-                self.subtitles_var.set(False)
+                messagebox. showerror("Ошибка", "Модель не загружена.")
+                self. subtitles_var. set( False)
                 return
-            if self.subtitles_var.get():
-                self.start_subtitles()
+
+            current_time = time.time()
+            if current_time - self.last_subtitle_toggle_time < 0.6:
+                print("[Anti-Crash] Слишком быстрый клик! Сигнал проигнорирован.")
+                self.subtitles_var.set(not self.subtitles_var.get())
+                return
+            self.last_subtitle_toggle_time = current_time
+
+            if self. subtitles_var. get():
+                self. start_subtitles()
             else:
-                self.stop_subtitles()
+                self. stop_subtitles()
         elif func_name == "Голосовой ввод текста":
             if self.model_loading:
                 messagebox.showwarning("Загрузка модели", "Модель ещё загружается.")
@@ -808,20 +821,22 @@ class AssistiveSuite(tb.Window):
         messagebox.showerror("Ошибка субтитров", err_msg)
 
     def update_subtitle_text(self, text, is_partial=False):
-        if not self.subtitles_active or not self.overlay_sub:
-            return
-        cleaned = text.strip()
-        if is_partial:
-            self.partial_text = cleaned
-            display_text = self._get_display_text(include_partial=True)
-        else:
-            if cleaned and cleaned != (self.subtitle_history[-1] if self.subtitle_history else ""):
-                self.subtitle_history.append(cleaned)
-                if len(self.subtitle_history) > 3:
-                    self.subtitle_history.pop(0)
-            self.partial_text = ""
-            display_text = self._get_display_text(include_partial=False)
-        self.after(0, lambda: self._update_text_widget(display_text, is_partial))
+        # Определяем цвет: промежуточный черновик — серый, готовая фраза — белая
+        color = "gray" if is_partial else "white"
+        
+        # Проверяем, существует ли виджет метки в интерфейсе
+        if hasattr(self, 'subtitle_label') and self.subtitle_label:
+            try:
+                # Безопасно обновляем конфигурацию текста и цвета
+                self.subtitle_label.config(text=text, fg=color)
+                
+                # ФИКС KAN-14: Принудительно заставляем графический движок Tkinter
+                # мгновенно очистить старый слой пикселей перед отрисовкой новых букв
+                self.subtitle_label.update_idletasks()
+                
+            except Exception as e:
+                print(f"[Subtitles UI Фикс] Ошибка обновления интерфейса: {e}")
+
 
     def _get_display_text(self, include_partial=False):
         history_text = "\n".join(self.subtitle_history[-3:])
@@ -897,26 +912,33 @@ class AssistiveSuite(tb.Window):
             self.voice_engine.level_callback = self.update_voice_level
 
     def start_voice_typing(self):
-        if not self.model_loaded:
-            messagebox.showwarning("Модель не загружена", "Подождите загрузки речевой модели.")
-            self.voice_typing_var.set(False)
-            return
-        if self.selected_voice_device is None:
-            messagebox.showwarning("Микрофон не выбран", "Сначала выберите микрофон в настройках (⚙️).")
-            self.voice_typing_var.set(False)
-            self.open_voice_settings()
-            return
-        self.voice_engine.model = self.shared_model
-        if not self.voice_engine.set_device(self.selected_voice_device):
-            messagebox.showerror("Ошибка", "Выбранный микрофон недоступен.")
-            self.voice_typing_var.set(False)
-            return
-        if self.voice_engine.start():
-            self.voice_active = True
-            self.show_voice_control_panel()
-        else:
-            messagebox.showerror("Ошибка", "Не удалось запустить захват звука.")
-            self.voice_typing_var.set(False)
+     if not self.model_loaded:
+         messagebox.showwarning("Модель не загружена", "Подождите загрузки речевой модели.")
+         self.voice_typing_var.set(False)
+         return
+         
+     # Жестко проверяем и выставляем дефолт, если переменная пустая или равна None
+     if not hasattr(self, 'selected_voice_device') or self.selected_voice_device is None:
+         self.selected_voice_device = -1
+     elif isinstance(self.selected_voice_device, str):
+         # На случай, если в переменной остался текст из комбобокса, переводим в чистый инт
+         try:
+             self.selected_voice_device = int(self.selected_voice_device)
+         except:
+             self.selected_voice_device = -1
+
+     self.voice_engine.model = self.shared_model
+     
+     # Передаем индекс в движок
+     self.voice_engine.set_device(self.selected_voice_device)
+     
+     # Запускаем захват звука
+     if self.voice_engine.start():
+         self.voice_active = True
+         self.show_voice_control_panel() # Твое окно панели управления теперь железно откроется!
+     else:
+         messagebox.showerror("Ошибка", "Не удалось запустить захват звука. Проверьте настройки микрофона.")
+         self.voice_typing_var.set(False)
 
     def stop_voice_typing(self):
         if self.voice_engine:
@@ -1146,51 +1168,201 @@ class AssistiveSuite(tb.Window):
         tb.Button(win, text="Сохранить", bootstyle="success", command=save).pack(pady=20)
 
     def open_voice_settings(self):
-        win = tb.Toplevel(title="Настройки голосового ввода", size=(550, 350))
-        win.resizable(False, False)
-        win.attributes("-topmost", True)
-        tb.Label(win, text="Голосовой ввод", font=("Segoe UI", 14, "bold")).pack(pady=15)
-        dev_frame = tb.Frame(win)
-        dev_frame.pack(fill=tk.X, padx=20, pady=10)
-        tb.Label(dev_frame, text="Микрофон:").pack(side=tk.LEFT, padx=(0, 10))
-        from voice_input import VoiceInputEngine
-        tmp = VoiceInputEngine(None)
-        devices = tmp.get_input_devices()
-        if not devices:
-            tb.Label(dev_frame, text="Микрофоны не найдены", foreground="red").pack(side=tk.LEFT)
-            voice_combo = None
-        else:
-            device_names = [f"{idx}: {name}" for idx, name in devices]
-            voice_combo = ttk.Combobox(dev_frame, values=device_names, state="readonly", width=50)
-            voice_combo.pack(side=tk.LEFT)
-            found = False
-            if hasattr(self, 'selected_voice_device'):
-                for item in device_names:
-                    if item.startswith(f"{self.selected_voice_device}:"):
-                        voice_combo.set(item)
-                        found = True
-                        break
-            if not found and device_names:
-                voice_combo.current(0)
+        # Внутри метода перед каждой строчкой должно быть по 8 пробелов!
+        win_voice = tb.Toplevel(title="Настройки голосового ввода", size=(450, 320))
+        win_voice.resizable(False, False)
+        win_voice.transient(self)
+        win_voice.grab_set()
 
-        def save():
-            if voice_combo:
-                sel = voice_combo.get()
+        frame_voice = tb.Frame(win_voice, padding=20)
+        frame_voice.pack(fill=tk.BOTH, expand=True)
+
+        tb.Label(frame_voice, text="Выберите микрофон для ввода текста:", font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+
+                # Прямой сбор устройств через PyAudio прямо внутри интерфейса
+                # Прямой сбор устройств через PyAudio с фильтрацией дубликатов по имени
+        import pyaudiowpatch as pa
+        devices = []
+        seen_names = set() # Множество для отслеживания уже добавленных имен
+        
+        try:
+            p_temp = pa.PyAudio()
+            for i in range(p_temp.get_device_count()):
+                try:
+                    dev_info = p_temp.get_device_info_by_index(i)
+                    if dev_info.get('maxInputChannels', 0) > 0:
+                        name = dev_info.get('name', f"Микрофон {i}").strip()
+                        if isinstance(name, bytes):
+                            name = name.decode('utf-8', errors='ignore')
+
+                        ignore_keywords = ["динамик", "наушник", "speaker", "headphone", "loopback", "output"]
+                        
+                        # Проверяем, нужно ли игнорировать устройство
+                        should_ignore = any(keyword in name.lower() for keyword in ignore_keywords)
+
+                        # Добавляем устройство только если его имя уникально и это не динамики/наушники
+                        if name not in seen_names and not should_ignore:
+                            seen_names.add(name)
+                            devices.append((i, name))
+
+                except:
+                    continue
+            p_temp.terminate()
+        except Exception as e:
+            print(f"[UI Audio Debug] Ошибка PortAudio: {e}")
+
+        device_list = ["-1: Системное устройство (По умолчанию)"] + [f"{i}: {name}" for i, name in devices]
+        
+        # Убираем textvariable=device_var, оставляя только values
+        device_combo = ttk.Combobox(frame_voice, values=device_list, state="readonly")
+        device_combo.pack(fill=tk.X, pady=(0, 15))
+
+        # Жёстко и принудительно выставляем текст по умолчанию в комбобокс
+        current_dev = -1
+        if hasattr(self, 'settings') and self.settings:
+            current_dev = self.settings.get("voice_input", {}).get("device_index", -1)
+            
+        # Находим нужную строчку в списке или собираем её на лету
+        target_value = next((item for item in device_list if item.startswith(f"{current_dev}:")), None)
+        if not target_value:
+            if current_dev == -1:
+                target_value = "-1: Системное устройство (По умолчанию)"
+            else:
+                target_value = f"{current_dev}: Настроенное устройство записи"
+                
+        # Принудительно вбиваем текст в комбобокс
+        device_combo.set(target_value)
+
+        def save_voice_config():
+            selected = device_combo.get()
+            if selected:
+                try:
+                    idx = int(selected.split(":")[0])
+                    if "voice_input" not in self.settings:
+                        self.settings["voice_input"] = {}
+                    self.settings["voice_input"]["device_index"] = idx
+                    self.selected_voice_device = idx
+                    
+                    if hasattr(self, 'voice_input') and self.voice_input:
+                        self.voice_input.set_device(idx)
+                        
+                    self.save_settings()
+                    messagebox.showinfo("Успех", "Настройки микрофона успешно сохранены.", parent=win_voice)
+                    win_voice.destroy()
+                except Exception as e:
+                    messagebox.showerror("Ошибка", f"Не удалось сохранить настройки: {e}", parent=win_voice)
+            else:
+                win_voice.destroy()
+
+        def internal_open_replacements():
+            win_repl = tb.Toplevel(win_voice)
+            win_repl.title("Настройка голосовых замен")
+            win_repl.geometry("600x550")
+            win_repl.resizable(False, False)
+            win_repl.transient(win_voice)
+            win_repl.grab_set()
+
+            if "voice_replacements" not in self.settings:
+                self.settings["voice_replacements"] = {
+                    "знак запятая": ",", 
+                    "знак точка": ".", 
+                    "знак вопрос": "?",
+                    "знак восклицания": "!"
+                }
+            replacements = self.settings["voice_replacements"]
+
+            frame_repl = tb.Frame(win_repl, padding=15)
+            frame_repl.pack(fill=tk.BOTH, expand=True)
+
+            tb.Label(frame_repl, text="Добавить новую замену:", font=("Segoe UI", 12, "bold")).pack(anchor=tk.W, pady=(0,10))
+            tb.Label(frame_repl, text="Что говорить (голосовая команда):").pack(anchor=tk.W)
+            
+            cmd_frame = tb.Frame(frame_repl)
+            cmd_frame.pack(fill=tk.X, pady=(2, 10))
+            entry_cmd = tb.Entry(cmd_frame)
+            entry_cmd.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+
+            def record_phrase():
+                def listen():
+                    import speech_recognition as sr
+                    recognizer = sr.Recognizer()
+                    with sr.Microphone() as source:
+                        try:
+                            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                            win_repl.after(0, lambda: messagebox.showinfo("Запись", "Говорите команду...", parent=win_repl))
+                            audio = recognizer.listen(source, timeout=4, phrase_time_limit=4)
+                            text = recognizer.recognize_google(audio, language="ru-RU").lower().strip()
+                            win_repl.after(0, lambda: entry_cmd.delete(0, tk.END))
+                            win_repl.after(0, lambda: entry_cmd.insert(0, text))
+                        except Exception as e:
+                            win_repl.after(0, lambda: messagebox.showerror("Ошибка", f"Не удалось записать: {e}", parent=win_repl))
+                threading.Thread(target=listen, daemon=True).start()
+
+            tb.Button(cmd_frame, text="🎤", width=4, bootstyle="outline-secondary", command=record_phrase).pack(side=tk.RIGHT)
+
+            tb.Label(frame_repl, text="На какой символ или слово заменять:").pack(anchor=tk.W)
+            sym_frame = tb.Frame(frame_repl)
+            sym_frame.pack(fill=tk.X, pady=(2, 15))
+            entry_sym = tb.Entry(sym_frame)
+            entry_sym.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+
+            tb.Button(sym_frame, text="⌨️ Клавиатура", bootstyle="outline-info", 
+                      command=lambda: os.system("start osk.exe")).pack(side=tk.RIGHT)
+
+            list_container = tb.Frame(frame_repl)
+            list_container.pack(fill=tk.BOTH, expand=True, pady=5)
+            listbox = tk.Listbox(list_container, font=("Courier New", 10))
+            listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scroll = tb.Scrollbar(list_container, orient=tk.VERTICAL, command=listbox.yview)
+            scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            listbox.configure(yscrollcommand=scroll.set)
+
+            listbox_keys = []
+
+            def refresh():
+                listbox.delete(0, tk.END)
+                listbox_keys.clear()
+                for cmd, sym in replacements.items():
+                    listbox_keys.append(cmd)
+                    listbox.insert(tk.END, f" 🗣 '{cmd}'  ➔  🎹 '{sym}'")
+
+            def add():
+                cmd_text = entry_cmd.get().strip().lower()
+                sym_text = entry_sym.get().strip()
+                if not cmd_text or not sym_text:
+                    messagebox.showwarning("Ошибка", "Заполните оба поля!", parent=win_repl)
+                    return
+                replacements[cmd_text] = sym_text
+                self.settings["voice_replacements"] = replacements
+                self.save_settings()
+                refresh()
+                entry_cmd.delete(0, tk.END)
+                entry_sym.delete(0, tk.END)
+
+            def delete():
+                sel = listbox.curselection()
                 if sel:
-                    try:
-                        self.selected_voice_device = int(sel.split(":")[0])
-                        self.settings["voice_input"]["device_index"] = self.selected_voice_device
+                    index = sel[0]
+                    cmd_to_del = listbox_keys[index]
+                    if cmd_to_del in replacements:
+                        del replacements[cmd_to_del]
+                        self.settings["voice_replacements"] = replacements
                         self.save_settings()
-                        if hasattr(self, 'voice_engine') and self.voice_engine:
-                            self.voice_engine.set_device(self.selected_voice_device)
-                    except:
-                        pass
-            was_active = getattr(self, 'voice_active', False)
-            win.destroy()
-            if was_active:
-                self.stop_voice_typing()
-                self.after(300, self.start_voice_typing)
-        tb.Button(win, text="Сохранить", bootstyle="success", command=save).pack(pady=20)
+                        refresh()
+
+            tb.Button(frame_repl, text="Добавить замену", bootstyle="success", command=add).pack(fill=tk.X, pady=3)
+            tb.Button(frame_repl, text="Удалить выбранное", bootstyle="danger-outline", command=delete).pack(fill=tk.X, pady=3)
+            refresh()
+
+        tb.Button(frame_voice, text="🔣 Настройка голосовых замен и знаков", 
+                  bootstyle="info-outline", command=internal_open_replacements).pack(fill=tk.X, pady=(0, 20))
+
+        actions_frame = tb.Frame(frame_voice)
+        actions_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+
+        tb.Button(actions_frame, text="Сохранить микрофон", bootstyle="success", command=save_voice_config).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        tb.Button(actions_frame, text="Отмена", bootstyle="secondary", command=win_voice.destroy).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+
 
     def open_color_correction_settings(self):
         if hasattr(self, '_color_settings_win') and self._color_settings_win is not None:
@@ -1531,6 +1703,108 @@ class AssistiveSuite(tb.Window):
                 self.db.close()
             self.save_settings()
             self.destroy()
+
+        def open_voice_replacements_window(self):
+            """Окно настройки голосовых замен знаков препинания и символов (KAN-12)"""
+            win = tb.Toplevel(self)
+            win.title("Настройка голосовых замен")
+            win.geometry("600x550")
+            win.resizable(False, False)
+            win.transient(self)
+            win.grab_set()
+
+            # Создаем словарь в общих настройках, если его там нет
+            if "voice_replacements" not in self.settings:
+                self.settings["voice_replacements"] = {
+                    "знак запятая": ",", 
+                    "знак точка": ".", 
+                    "знак вопрос": "?",
+                    "знак восклицания": "!"
+                }
+            replacements = self.settings["voice_replacements"]
+
+            frame = tb.Frame(win, padding=15)
+            frame.pack(fill=tk.BOTH, expand=True)
+
+            tb.Label(frame, text="Добавить новую замену:", font=("Segoe UI", 12, "bold")).pack(anchor=tk.W, pady=(0,10))
+            tb.Label(frame, text="Что говорить (голосовая команда):").pack(anchor=tk.W)
+        
+            cmd_frame = tb.Frame(frame)
+            cmd_frame.pack(fill=tk.X, pady=(2, 10))
+            entry_cmd = tb.Entry(cmd_frame)
+            entry_cmd.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+
+            def record_phrase():
+                def listen():
+                    import speech_recognition as sr
+                    recognizer = sr.Recognizer()
+                    with sr.Microphone() as source:
+                        try:
+                            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                            win.after(0, lambda: messagebox.showinfo("Запись", "Говорите команду...", parent=win))
+                            audio = recognizer.listen(source, timeout=4, phrase_time_limit=4)
+                            text = recognizer.recognize_google(audio, language="ru-RU").lower().strip()
+                            win.after(0, lambda: entry_cmd.delete(0, tk.END))
+                            win.after(0, lambda: entry_cmd.insert(0, text))
+                        except Exception as e:
+                            win.after(0, lambda: messagebox.showerror("Ошибка", f"Не удалось записать: {e}", parent=win))
+                threading.Thread(target=listen, daemon=True).start()
+
+            tb.Button(cmd_frame, text="🎤", width=4, bootstyle="outline-secondary", command=record_phrase).pack(side=tk.RIGHT)
+
+            tb.Label(frame, text="На какой символ или слово заменять:").pack(anchor=tk.W)
+            sym_frame = tb.Frame(frame)
+            sym_frame.pack(fill=tk.X, pady=(2, 15))
+            entry_sym = tb.Entry(sym_frame)
+            entry_sym.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+
+            tb.Button(sym_frame, text="⌨️ Клавиатура", bootstyle="outline-info", 
+                      command=lambda: os.system("start osk.exe")).pack(side=tk.RIGHT)
+
+            list_container = tb.Frame(frame)
+            list_container.pack(fill=tk.BOTH, expand=True, pady=5)
+            listbox = tk.Listbox(list_container, font=("Courier New", 10))
+            listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scroll = tb.Scrollbar(list_container, orient=tk.VERTICAL, command=listbox.yview)
+            scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            listbox.configure(yscrollcommand=scroll.set)
+
+            listbox_keys = []
+
+            def refresh():
+                listbox.delete(0, tk.END)
+                listbox_keys.clear()
+                for cmd, sym in replacements.items():
+                    listbox_keys.append(cmd)
+                    listbox.insert(tk.END, f" 🗣 '{cmd}'  ➔  🎹 '{sym}'")
+
+            def add():
+                cmd_text = entry_cmd.get().strip().lower()
+                sym_text = entry_sym.get().strip()
+                if not cmd_text or not sym_text:
+                    messagebox.showwarning("Ошибка", "Заполните оба поля!", parent=win)
+                    return
+                replacements[cmd_text] = sym_text
+                self.settings["voice_replacements"] = replacements
+                self.save_settings()
+                refresh()
+                entry_cmd.delete(0, tk.END)
+                entry_sym.delete(0, tk.END)
+
+            def delete():
+                sel = listbox.curselection()
+                if sel:
+                    index = sel[0]  # Исправлено извлечение индекса
+                    cmd_to_del = listbox_keys[index]
+                    if cmd_to_del in replacements:
+                        del replacements[cmd_to_del]
+                        self.settings["voice_replacements"] = replacements
+                        self.save_settings()
+                        refresh()
+
+            tb.Button(frame, text="Добавить замену", bootstyle="success", command=add).pack(fill=tk.X, pady=3)
+            tb.Button(frame, text="Удалить выбранное", bootstyle="danger-outline", command=delete).pack(fill=tk.X, pady=3)
+            refresh()
 
 if __name__ == "__main__":
     app = AssistiveSuite()
