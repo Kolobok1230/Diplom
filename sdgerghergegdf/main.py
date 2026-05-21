@@ -1093,9 +1093,20 @@ class AssistiveSuite(tb.Window):
         tb.Button(container, text="Применить настройки", bootstyle="success", command=apply).pack(pady=15, fill=tk.X)
 
     def open_subtitle_settings(self):
+        if hasattr(self, '_subtitle_win') and self._subtitle_win is not None:
+            try:
+                self._subtitle_win.lift()
+                self._subtitle_win.focus_force()
+                return
+            except:
+                self._subtitle_win = None
         win = tb.Toplevel(title="Настройки субтитров", size=(620, 420))
         win.resizable(False, False)
+        self._subtitle_win = win
+        win.protocol("WM_DELETE_WINDOW", lambda: setattr(self, '_subtitle_win', None))
+
         tb.Label(win, text="Настройка субтитров", font=("Segoe UI", 14, "bold")).pack(pady=15)
+
         dev_frame = tb.Frame(win)
         dev_frame.pack(fill=tk.X, padx=20, pady=10)
         tb.Label(dev_frame, text="Устройство захвата (loopback):").pack(side=tk.LEFT, padx=(0, 10))
@@ -1113,6 +1124,7 @@ class AssistiveSuite(tb.Window):
         if not device_combo.get() and devices:
             device_combo.set(device_names[0])
         self.device_combo = device_combo
+
         alpha_frame = tb.Frame(win)
         alpha_frame.pack(fill=tk.X, padx=20, pady=10)
         tb.Label(alpha_frame, text="Прозрачность окна:").pack(side=tk.LEFT, padx=(0, 10))
@@ -1141,6 +1153,35 @@ class AssistiveSuite(tb.Window):
         size_slider.pack(side=tk.LEFT, padx=5)
         size_label = tb.Label(font_frame, text=f"{self.font_size}px")
         size_label.pack(side=tk.LEFT)
+
+        def update_font(*args):
+            self.font_family = font_combo.get()
+            self.font_size = int(size_slider.get())
+            size_label.config(text=f"{self.font_size}px")
+            if self.overlay_sub and self.overlay_sub.winfo_exists():
+                self.overlay_sub.text_widget.configure(font=(self.font_family, self.font_size))
+            self.settings["subtitles"]["font_family"] = self.font_family
+            self.settings["subtitles"]["font_size"] = self.font_size
+            self.save_settings()
+        font_combo.bind("<<ComboboxSelected>>", update_font)
+        size_slider.configure(command=lambda v: update_font())
+
+        def save():
+            if not win.winfo_exists():
+                return
+            if hasattr(self, 'device_combo') and self.device_combo.winfo_exists():
+                sel = self.device_combo.get()
+                if sel:
+                    self.selected_device_index = int(sel.split(":")[0])
+            else:
+                return
+            self.settings["subtitles"]["device_index"] = self.selected_device_index
+            self.save_settings()
+            was_active = self.subtitles_active
+            win.destroy()
+            if was_active:
+                self.stop_subtitles()
+                self.after(300, self.start_subtitles)
 
         def update_font(*args):
             self.font_family = font_combo.get()

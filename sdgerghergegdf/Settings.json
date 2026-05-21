@@ -3,10 +3,10 @@
         "theme": "darkly"
     },
     "subtitles": {
-        "alpha": 0.8,
+        "alpha": 0.853763440860215,
         "font_family": "Segoe UI",
-        "font_size": 14,
-        "device_index": null
+        "font_size": 12,
+        "device_index": 23
     },
     "voice_input": {
         "device_index": 1
@@ -27,10 +27,6 @@
         "gain": 0.7
     },
     "voice_commands": {
-        "игра для долбоёбов": {
-            "type": "script",
-            "value": "фвфвфыв"
-        },
         "открыть инструкцию": {
             "type": "builtin",
             "value": "Открыть инструкцию"
@@ -42,10 +38,13 @@
         "заблокировать компьютер": "win+l",
         "сменить язык": "shift+alt"
     },
-    "script_buttons": {
-        "фвфвфыв": [
-            "D:/Genshin Impact game/GenshinImpact.exe"
-        ]
-    },
-    "minimize_to_tray": false
+    "script_buttons": {},
+    "minimize_to_tray": false,
+    "voice_replacements": {
+        "знак запятая": ",",
+        "знак точка": ".",
+        "знак вопрос": "?",
+        "восклицательный знак": "!",
+        "хочу какать": "%"
+    }
 }
