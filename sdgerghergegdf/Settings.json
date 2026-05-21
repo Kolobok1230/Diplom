@@ -1,0 +1,51 @@
+{
+    "app": {
+        "theme": "darkly"
+    },
+    "subtitles": {
+        "alpha": 0.8,
+        "font_family": "Segoe UI",
+        "font_size": 14,
+        "device_index": null
+    },
+    "voice_input": {
+        "device_index": 1
+    },
+    "head_tracking": {
+        "camera_index": 1,
+        "sensitivity_x": 10.0,
+        "sensitivity_y": 12.0,
+        "invert_x": true,
+        "swap_eyes": true,
+        "precision_interval_ms": 100,
+        "reset_blinks": 2,
+        "reset_time": 2.0
+    },
+    "color_correction": {
+        "type": "deuteranomaly",
+        "intensity": 0.7,
+        "gain": 0.7
+    },
+    "voice_commands": {
+        "игра для долбоёбов": {
+            "type": "script",
+            "value": "фвфвфыв"
+        },
+        "открыть инструкцию": {
+            "type": "builtin",
+            "value": "Открыть инструкцию"
+        }
+    },
+    "hotkey_commands": {
+        "смена окна": "alt+tab",
+        "свернуть окна": "win+d",
+        "заблокировать компьютер": "win+l",
+        "сменить язык": "shift+alt"
+    },
+    "script_buttons": {
+        "фвфвфыв": [
+            "D:/Genshin Impact game/GenshinImpact.exe"
+        ]
+    },
+    "minimize_to_tray": false
+}
